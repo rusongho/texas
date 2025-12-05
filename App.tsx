@@ -5,11 +5,12 @@ import { VisualCard } from './components/VisualCard';
 import { PlayerAvatar } from './components/PlayerAvatar';
 import { Chips } from './components/Chips';
 import { getGeminiCommentary } from './services/geminiService';
-import { MessageSquare, Trophy, Timer, Settings } from 'lucide-react';
+import { MessageSquare, Trophy, Timer, Plus, Play, UserPlus } from 'lucide-react';
 
 // --- Configuration ---
 const BIG_BLIND = 20;
 const SMALL_BLIND = 10;
+const MAX_SEATS = 9;
 
 const App: React.FC = () => {
   // -- State --
@@ -19,14 +20,16 @@ const App: React.FC = () => {
   const [communityCards, setCommunityCards] = useState<Card[]>([]);
   const [pot, setPot] = useState(0);
   const [currentBet, setCurrentBet] = useState(0);
-  const [activePlayerIdx, setActivePlayerIdx] = useState(0);
-  const [dealerIdx, setDealerIdx] = useState(0);
-  const [winnerIdx, setWinnerIdx] = useState<number | null>(null);
+  const [activePlayerIdx, setActivePlayerIdx] = useState(0); // Index in the `players` array, NOT seat index
+  const [dealerIdx, setDealerIdx] = useState(0); // Index in the `players` array
+  const [winnerIdx, setWinnerIdx] = useState<number | null>(null); // Index in the `players` array
   const [gameLogs, setGameLogs] = useState<LogEntry[]>([]);
-  const [showCards, setShowCards] = useState(false); // Hotseat reveal toggle
+  const [showCards, setShowCards] = useState(false);
   const [autoNextTimer, setAutoNextTimer] = useState<number | null>(null);
 
-  // Setup inputs
+  // Setup / Sit Down Logic
+  const [isSitModalOpen, setIsSitModalOpen] = useState(false);
+  const [selectedSeatIdx, setSelectedSeatIdx] = useState<number | null>(null);
   const [newPlayerName, setNewPlayerName] = useState('');
   const [buyInAmount, setBuyInAmount] = useState(1000);
 
@@ -44,10 +47,19 @@ const App: React.FC = () => {
     }
   }, [gameLogs]);
 
-  // --- Game Lifecycle Actions ---
+  // --- Seating Actions ---
 
-  const addPlayer = () => {
-    if (!newPlayerName.trim() || players.length >= 9) return;
+  const handleSeatClick = (seatIdx: number) => {
+    if (phase !== GamePhase.Setup) return;
+    setSelectedSeatIdx(seatIdx);
+    setNewPlayerName(`Player ${seatIdx + 1}`);
+    setBuyInAmount(1000);
+    setIsSitModalOpen(true);
+  };
+
+  const confirmSitDown = () => {
+    if (!newPlayerName.trim() || selectedSeatIdx === null) return;
+    
     const newPlayer: Player = {
       id: Math.random().toString(36).substr(2, 9),
       name: newPlayerName,
@@ -58,24 +70,40 @@ const App: React.FC = () => {
       isDealer: false,
       isSmallBlind: false,
       isBigBlind: false,
+      seatIndex: selectedSeatIdx,
     };
-    setPlayers([...players, newPlayer]);
+    
+    // Insert player into the array while keeping it sorted by seat index ideally, 
+    // or just append and we sort later. For the game logic, the `players` array 
+    // represents the "Action Order". We usually sort them by seat index for consistency.
+    const updatedPlayers = [...players, newPlayer].sort((a, b) => a.seatIndex - b.seatIndex);
+    
+    setPlayers(updatedPlayers);
+    setIsSitModalOpen(false);
+    setSelectedSeatIdx(null);
     setNewPlayerName('');
+    addLog(`${newPlayer.name} sat down at Seat ${selectedSeatIdx + 1}.`, 'info');
   };
+
+  const standUp = (playerId: string) => {
+    if (phase !== GamePhase.Setup) return;
+    setPlayers(players.filter(p => p.id !== playerId));
+  };
+
+  // --- Game Lifecycle Actions ---
 
   const startGame = () => {
     if (players.length < 2) return;
-    // Apply buy-in to all current players just in case
-    const readyPlayers = players.map(p => ({ ...p, chips: buyInAmount }));
-    setPlayers(readyPlayers);
     setPhase(GamePhase.PreFlop);
-    startNewHand(0, readyPlayers); // Start with first dealer
+    startNewHand(0, players); // Start with first dealer in list
   };
 
   const startNewHand = (newDealerIdx: number, currentPlayers: Player[]) => {
     setAutoNextTimer(null);
     // Reset Deck
     const newDeck = shuffleDeck(createDeck());
+    
+    // Filter out busted players or reset active ones
     const resetPlayers = currentPlayers.map(p => ({
       ...p,
       hand: [],
@@ -84,41 +112,83 @@ const App: React.FC = () => {
       isDealer: false,
       isSmallBlind: false,
       isBigBlind: false,
-    })).filter(p => p.status !== PlayerStatus.Busted);
+    }));
 
-    // Check game over
-    if (resetPlayers.length < 2) {
-      addLog(`Game Over! ${resetPlayers[0]?.name} wins everything!`, 'winner');
-      setPhase(GamePhase.Setup); // Return to lobby
+    // Check if enough active players
+    const activeCount = resetPlayers.filter(p => p.status !== PlayerStatus.Busted).length;
+    if (activeCount < 2) {
+      const winner = resetPlayers.find(p => p.status !== PlayerStatus.Busted);
+      addLog(`Game Over! ${winner?.name || 'Everyone'} wins/left!`, 'winner');
+      setPhase(GamePhase.Setup); // Return to lobby/setup
       setPlayers(resetPlayers);
       return;
     }
 
-    // Set positions
-    const dealer = resetPlayers[newDealerIdx % resetPlayers.length];
-    const sbIdx = (newDealerIdx + 1) % resetPlayers.length;
-    const bbIdx = (newDealerIdx + 2) % resetPlayers.length;
+    // Determine positions relative to the players array (compact list)
+    // Note: dealerIdx is index in the PLAYERS ARRAY, not seat index.
+    const activeIndices = resetPlayers.map((p, i) => i).filter(i => resetPlayers[i].status !== PlayerStatus.Busted);
     
-    dealer.isDealer = true;
-    resetPlayers[sbIdx].isSmallBlind = true;
-    resetPlayers[bbIdx].isBigBlind = true;
+    // Move dealer button to next ACTIVE player
+    // If we just blindly increment, we might hit a busted player.
+    // Let's simplify: dealerIdx passed in is the index in the FULL player array.
+    // If that player is busted, we need to find the next active one? 
+    // Standard poker: Button moves. If player busts, button might skip or move.
+    // For simplicity: Button moves to next person in array (mod length). If they are busted, they can't be dealer? 
+    // Actually, dealer button CAN be on a busted player technically in some rules, but let's assume Dealer is always Active.
+    
+    let actualDealerIdx = newDealerIdx % resetPlayers.length;
+    while(resetPlayers[actualDealerIdx].status === PlayerStatus.Busted) {
+        actualDealerIdx = (actualDealerIdx + 1) % resetPlayers.length;
+    }
 
-    // Deal Hands (2 cards each)
+    // Set roles
+    resetPlayers.forEach(p => { p.isDealer = false; p.isSmallBlind = false; p.isBigBlind = false; });
+    
+    const dealerPlayer = resetPlayers[actualDealerIdx];
+    dealerPlayer.isDealer = true;
+
+    // Find SB (Next active after Dealer)
+    let sbIdx = (actualDealerIdx + 1) % resetPlayers.length;
+    while(resetPlayers[sbIdx].status === PlayerStatus.Busted) sbIdx = (sbIdx + 1) % resetPlayers.length;
+    
+    // Find BB (Next active after SB)
+    let bbIdx = (sbIdx + 1) % resetPlayers.length;
+    while(resetPlayers[bbIdx].status === PlayerStatus.Busted) bbIdx = (bbIdx + 1) % resetPlayers.length;
+    
+    // Heads up exception: Dealer is SB, Other is BB.
+    if (activeCount === 2) {
+       // In Heads Up, Dealer is SB. 
+       // Current logic: D=0. SB=1. BB=0. -> SB=BB ??
+       // Correct Heads up: Dealer posts SB. Non-Dealer posts BB.
+       // My simple logic: Dealer=0. SB=Next(1). BB=Next(0). 
+       // So Dealer is BB? That's wrong.
+       // Let's swap for Heads up:
+       resetPlayers[actualDealerIdx].isSmallBlind = true;
+       resetPlayers[sbIdx].isBigBlind = true;
+       // We keep dealer button on actualDealerIdx.
+    } else {
+       resetPlayers[sbIdx].isSmallBlind = true;
+       resetPlayers[bbIdx].isBigBlind = true;
+    }
+
+    // Deal Hands
     resetPlayers.forEach(p => {
-      p.hand = [newDeck.pop()!, newDeck.pop()!];
+       if(p.status !== PlayerStatus.Busted) {
+         p.hand = [newDeck.pop()!, newDeck.pop()!];
+       }
     });
 
-    // Blinds
+    // Post Blinds
+    const sbPlayer = resetPlayers.find(p => p.isSmallBlind)!;
+    const bbPlayer = resetPlayers.find(p => p.isBigBlind)!;
+    
     let potStart = 0;
-    // SB
-    const sbPlayer = resetPlayers[sbIdx];
+    
     const sbAmt = Math.min(sbPlayer.chips, SMALL_BLIND);
     sbPlayer.chips -= sbAmt;
     sbPlayer.bet = sbAmt;
     potStart += sbAmt;
 
-    // BB
-    const bbPlayer = resetPlayers[bbIdx];
     const bbAmt = Math.min(bbPlayer.chips, BIG_BLIND);
     bbPlayer.chips -= bbAmt;
     bbPlayer.bet = bbAmt;
@@ -129,12 +199,21 @@ const App: React.FC = () => {
     setCommunityCards([]);
     setPot(potStart);
     setCurrentBet(BIG_BLIND);
-    setDealerIdx(newDealerIdx);
+    setDealerIdx(actualDealerIdx);
     setWinnerIdx(null);
     setShowCards(false);
-    
+
     // Action starts after BB
-    setActivePlayerIdx((bbIdx + 1) % resetPlayers.length);
+    // If Heads up: Dealer(SB) -> Non-Dealer(BB) -> Action is Dealer(SB)? No, Preflop action starts Left of BB.
+    // Heads Up: Dealer is SB. BB is other. Action starts with Button (SB).
+    // 3+ players: SB, BB, UTG (Left of BB).
+    
+    let firstActionIdx = (resetPlayers.findIndex(p => p.isBigBlind) + 1) % resetPlayers.length;
+    while(resetPlayers[firstActionIdx].status === PlayerStatus.Busted) {
+        firstActionIdx = (firstActionIdx + 1) % resetPlayers.length;
+    }
+    
+    setActivePlayerIdx(firstActionIdx);
     setPhase(GamePhase.PreFlop);
     addLog(`New Hand. Blinds ${SMALL_BLIND}/${BIG_BLIND}`, 'info');
   };
@@ -206,12 +285,12 @@ const App: React.FC = () => {
 
     if (winner) {
       const w = winner as Player;
-      setWinnerIdx(players.findIndex(p => p.id === w.id));
+      const wIdx = players.findIndex(p => p.id === w.id);
+      setWinnerIdx(wIdx);
+      
       const newPlayers = [...players];
-      const winnerRef = newPlayers.find(p => p.id === w.id);
-      if (winnerRef) {
-        winnerRef.chips += pot;
-      }
+      newPlayers[wIdx].chips += pot;
+      
       setPlayers(newPlayers);
       addLog(`${w.name} wins ${pot} chips with ${winDesc}!`, 'winner');
 
@@ -242,7 +321,6 @@ const App: React.FC = () => {
     setPlayers(newPlayers);
     addLog(`${folderName} folds.`, 'action');
     
-    // Check if only one player remains
     const remaining = newPlayers.filter(p => p.status !== PlayerStatus.Folded && p.status !== PlayerStatus.Busted);
     if (remaining.length === 1) {
       // Immediate win
@@ -253,7 +331,7 @@ const App: React.FC = () => {
       newPlayers.forEach(p => p.bet = 0);
       setPlayers(newPlayers);
       setPot(0);
-      setPhase(GamePhase.Showdown); // Visually indicate end
+      setPhase(GamePhase.Showdown);
       addLog(`${winner.name} wins by default!`, 'winner');
       
       let countdown = 4;
@@ -268,7 +346,6 @@ const App: React.FC = () => {
       }, 1000);
       return;
     }
-    
     moveToNextPlayer();
   };
 
@@ -290,7 +367,6 @@ const App: React.FC = () => {
       setPot(pot + amountToCall);
       addLog(`${pRef.name} ${amountToCall === 0 ? 'checks' : 'calls'}.`, 'action');
     }
-    
     setPlayers(newPlayers);
     moveToNextPlayer();
   };
@@ -301,10 +377,7 @@ const App: React.FC = () => {
     const totalBet = currentBet + amount; 
     const needed = totalBet - pRef.bet;
 
-    if (needed > pRef.chips) {
-       // Ideally handle all-in raise, but for simple logic:
-       return; 
-    }
+    if (needed > pRef.chips) return;
 
     pRef.chips -= needed;
     pRef.bet = totalBet;
@@ -331,23 +404,14 @@ const App: React.FC = () => {
     const activePlayers = players.filter(p => p.status === PlayerStatus.Active);
     const allInPlayers = players.filter(p => p.status === PlayerStatus.AllIn);
     
-    // Check if we should move to next phase
     if (activePlayers.length === 0 || (activePlayers.length === 1 && allInPlayers.length > 0)) {
-       setTimeout(nextPhase, 1000); // Auto run out
+       setTimeout(nextPhase, 1000);
        return;
     }
 
     const betsMatch = activePlayers.every(p => p.bet === currentBet);
     
-    // Simplistic phase transition logic:
-    // If everyone active has matched the bet, AND we have at least acted once? 
-    // In this simplified engine, if bets match and we aren't at the start of a street (where bets match at 0 but we need to check):
-    // PreFlop: BB is currentBet, so others match BB. 
-    // We need to ensure everyone had a turn. 
-    // Hack: delay phase change slightly to allow 'Check'. 
     if (betsMatch && (phase !== GamePhase.PreFlop || currentBet > BIG_BLIND || activePlayers.every(p => p.bet > 0))) {
-        // Only if the person we just moved FROM was the one completing the action?
-        // Let's just assume yes for this demo.
         setTimeout(nextPhase, 500);
         return;
     }
@@ -355,96 +419,19 @@ const App: React.FC = () => {
     setActivePlayerIdx(nextIdx);
   };
 
-  // --- Render ---
-
-  if (phase === GamePhase.Setup) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
-        <div className="max-w-md w-full bg-slate-800 p-8 rounded-2xl shadow-2xl border border-slate-700">
-          <h1 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-yellow-600 mb-2 text-center poker-font">
-            Gemini Poker Night
-          </h1>
-          <p className="text-slate-400 mb-6 text-center text-sm">
-            Setup your table. Share this screen or play Hotseat.
-          </p>
-          
-          <div className="space-y-6">
-            {/* Buy In Settings */}
-            <div className="bg-slate-900/50 p-4 rounded border border-white/5">
-              <label className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2 mb-2">
-                <Settings size={14} /> Table Buy-In
-              </label>
-              <div className="flex items-center gap-4">
-                 <input 
-                   type="range" 
-                   min="500" 
-                   max="10000" 
-                   step="500" 
-                   value={buyInAmount}
-                   onChange={(e) => setBuyInAmount(Number(e.target.value))}
-                   className="flex-1 accent-yellow-500"
-                 />
-                 <span className="text-yellow-400 font-mono font-bold w-20 text-right">${buyInAmount}</span>
-              </div>
-            </div>
-
-            {/* Player Add */}
-            <div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newPlayerName}
-                  onChange={(e) => setNewPlayerName(e.target.value)}
-                  placeholder="Enter player name"
-                  className="flex-1 bg-slate-900 border border-slate-600 rounded px-4 py-3 text-white focus:outline-none focus:border-yellow-500"
-                  onKeyDown={(e) => e.key === 'Enter' && addPlayer()}
-                />
-                <button 
-                  onClick={addPlayer}
-                  disabled={players.length >= 9}
-                  className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded font-bold transition-colors disabled:opacity-50"
-                >
-                  Join
-                </button>
-              </div>
-            </div>
-            
-            {/* Lobby List */}
-            <div className="bg-slate-900 rounded p-4 min-h-[120px]">
-              <h3 className="text-xs font-bold text-slate-500 uppercase mb-3 flex justify-between">
-                <span>Players ({players.length}/9)</span>
-                {players.length >= 9 && <span className="text-red-400">Full Table</span>}
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {players.map(p => (
-                  <span key={p.id} className="bg-slate-700 text-white px-3 py-1 rounded-full text-sm flex items-center gap-2 animate-in fade-in zoom-in">
-                    {p.name}
-                    <button onClick={() => setPlayers(players.filter(x => x.id !== p.id))} className="text-red-400 hover:text-red-300 ml-1">×</button>
-                  </span>
-                ))}
-                {players.length === 0 && <span className="text-slate-600 italic text-sm">Waiting for players...</span>}
-              </div>
-            </div>
-
-            <button 
-              onClick={startGame}
-              disabled={players.length < 2}
-              className="w-full bg-gradient-to-r from-yellow-500 to-orange-600 text-white font-bold py-4 rounded-xl text-xl shadow-lg hover:shadow-yellow-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform hover:scale-[1.02]"
-            >
-              Start Game
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // --- Table Layout ---
-  const getPlayerPosition = (index: number, total: number) => {
-    // Distribute around an ellipse
-    const angle = (index / total) * 2 * Math.PI + (Math.PI / 2);
-    const xRadius = 42; 
-    const yRadius = 38;
+  // --- Layout Helper ---
+  // Returns radial position based on FIXED seat index (0-8)
+  const getSeatPosition = (seatIndex: number) => {
+    const totalSeats = MAX_SEATS;
+    // Offset so seat 0 is at bottom center (or customized).
+    // Let's put Seat 0 at bottom center (6 o'clock).
+    // In standard math 0 rad is 3 o'clock. 
+    // Seat 0: PI/2 (90 deg) -> Bottom.
+    const angle = (seatIndex / totalSeats) * 2 * Math.PI + (Math.PI / 2);
+    
+    // Adjust x/y radius to fit screen aspect ratio
+    const xRadius = 44; 
+    const yRadius = 40;
     const x = 50 + xRadius * Math.cos(angle);
     const y = 48 + yRadius * Math.sin(angle);
     return { left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)' };
@@ -454,7 +441,46 @@ const App: React.FC = () => {
   const sortedPlayers = [...players].sort((a, b) => b.chips - a.chips);
 
   return (
-    <div className="h-screen w-screen bg-[#0f172a] relative overflow-hidden flex flex-col">
+    <div className="h-screen w-screen bg-[#0f172a] relative overflow-hidden flex flex-col font-sans select-none">
+      {/* Sit Down Modal */}
+      {isSitModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+          <div className="bg-slate-800 p-6 rounded-2xl border border-slate-600 shadow-2xl w-80 animate-in fade-in zoom-in-95">
+             <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+               <UserPlus size={20} className="text-yellow-500"/> Sit Down
+             </h3>
+             <div className="space-y-4">
+                <div>
+                   <label className="text-xs text-slate-400 uppercase font-bold">Player Name</label>
+                   <input 
+                      autoFocus
+                      className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white mt-1 focus:border-yellow-500 outline-none"
+                      value={newPlayerName}
+                      onChange={(e) => setNewPlayerName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && confirmSitDown()}
+                   />
+                </div>
+                <div>
+                   <label className="text-xs text-slate-400 uppercase font-bold">Buy In</label>
+                   <div className="flex items-center gap-2 mt-1">
+                      <input 
+                        type="range" min="500" max="5000" step="100" 
+                        value={buyInAmount}
+                        onChange={(e) => setBuyInAmount(Number(e.target.value))}
+                        className="flex-1 accent-yellow-500"
+                      />
+                      <span className="text-yellow-400 font-mono font-bold">${buyInAmount}</span>
+                   </div>
+                </div>
+                <div className="flex gap-2 pt-2">
+                   <button onClick={() => setIsSitModalOpen(false)} className="flex-1 py-2 rounded text-slate-400 hover:bg-slate-700">Cancel</button>
+                   <button onClick={confirmSitDown} className="flex-1 py-2 rounded bg-yellow-600 hover:bg-yellow-500 text-white font-bold">Join Table</button>
+                </div>
+             </div>
+          </div>
+        </div>
+      )}
+
       {/* Navbar */}
       <div className="h-14 bg-slate-900/90 border-b border-white/5 flex items-center justify-between px-6 z-20 shrink-0">
         <div className="flex items-center gap-4">
@@ -472,8 +498,8 @@ const App: React.FC = () => {
         )}
 
         <div className="flex items-center gap-2 text-sm text-slate-300">
-           <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-           <span className="hidden sm:inline">Online (Local)</span>
+           <div className={`w-2 h-2 rounded-full animate-pulse ${phase === GamePhase.Setup ? 'bg-yellow-500' : 'bg-green-500'}`}></div>
+           <span className="hidden sm:inline">{phase === GamePhase.Setup ? 'Table Open' : 'Game In Progress'}</span>
         </div>
       </div>
 
@@ -485,7 +511,8 @@ const App: React.FC = () => {
              <Trophy size={10} /> Chip Leaders
           </h3>
           <div className="space-y-1">
-             {sortedPlayers.map((p, i) => (
+             {sortedPlayers.length === 0 ? <div className="text-xs text-slate-600 italic">No players seated</div> : 
+             sortedPlayers.map((p, i) => (
                <div key={p.id} className="flex justify-between items-center text-xs">
                  <span className={`truncate max-w-[80px] ${i===0 ? 'text-yellow-400' : 'text-slate-300'}`}>
                    {i+1}. {p.name}
@@ -499,19 +526,37 @@ const App: React.FC = () => {
         {/* The Felt */}
         <div className="relative w-[95vw] h-[65vh] max-w-[1200px] bg-[#2e5c46] rounded-[100px] md:rounded-[200px] border-[12px] md:border-[16px] border-[#1a1a1a] shadow-[inset_0_0_100px_rgba(0,0,0,0.6)] flex flex-col items-center justify-center scale-95 md:scale-100 transition-transform">
           
-          {/* Pattern */}
           <div className="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/felt.png')] rounded-[80px] md:rounded-[180px] pointer-events-none"></div>
           
           <div className="absolute top-1/4 opacity-10 pointer-events-none text-white poker-font text-6xl tracking-widest font-bold">
             GEMINI
           </div>
 
+          {/* Start Button (Setup Phase) */}
+          {phase === GamePhase.Setup && players.length >= 2 && (
+             <div className="absolute z-50">
+               <button 
+                 onClick={startGame}
+                 className="flex items-center gap-2 bg-gradient-to-r from-yellow-500 to-orange-600 text-white text-lg font-bold px-8 py-3 rounded-full shadow-lg hover:scale-105 transition-transform animate-pulse"
+               >
+                 <Play fill="currentColor" size={20} /> Deal Cards
+               </button>
+             </div>
+          )}
+          
+          {phase === GamePhase.Setup && players.length < 2 && players.length > 0 && (
+             <div className="absolute top-1/3 text-white/50 text-sm font-bold bg-black/20 px-4 py-1 rounded-full backdrop-blur">
+                Waiting for {2 - players.length} more player(s)...
+             </div>
+          )}
+
           {/* Community Cards */}
           <div className="flex gap-2 sm:gap-4 mb-8 z-10 h-20 sm:h-32 items-center">
              {communityCards.map(c => (
                <VisualCard key={c.id} card={c} size="lg" className="shadow-2xl animate-in fade-in slide-in-from-top-4" />
              ))}
-             {Array.from({ length: 5 - communityCards.length }).map((_, i) => (
+             {/* Placeholders for visual balance only during play */}
+             {phase !== GamePhase.Setup && Array.from({ length: 5 - communityCards.length }).map((_, i) => (
                 <div key={i} className="w-16 h-24 sm:w-20 sm:h-32 border-2 border-white/5 rounded-md bg-black/10"></div>
              ))}
           </div>
@@ -532,17 +577,41 @@ const App: React.FC = () => {
              </div>
           )}
 
-          {/* Players */}
-          {players.map((p, idx) => (
-            <PlayerAvatar
-              key={p.id}
-              player={p}
-              isActive={idx === activePlayerIdx && phase !== GamePhase.Showdown}
-              isWinner={idx === winnerIdx}
-              revealCards={phase === GamePhase.Showdown || (idx === activePlayerIdx && showCards)}
-              positionStyle={getPlayerPosition(idx, players.length)}
-            />
-          ))}
+          {/* Seats (Render all 9 positions) */}
+          {Array.from({ length: MAX_SEATS }).map((_, i) => {
+             const seatedPlayer = players.find(p => p.seatIndex === i);
+             const style = getSeatPosition(i);
+             
+             // Is this seat index represented in the active player list?
+             // We need to find the index IN THE PLAYER ARRAY that matches this seat
+             const playerArrayIndex = players.findIndex(p => p.seatIndex === i);
+             
+             return (
+               <React.Fragment key={i}>
+                 {seatedPlayer ? (
+                   <PlayerAvatar
+                      player={seatedPlayer}
+                      isActive={playerArrayIndex === activePlayerIdx && phase !== GamePhase.Setup && phase !== GamePhase.Showdown}
+                      isWinner={playerArrayIndex === winnerIdx}
+                      revealCards={phase === GamePhase.Showdown || (playerArrayIndex === activePlayerIdx && showCards)}
+                      positionStyle={style}
+                      canStandUp={phase === GamePhase.Setup}
+                      onStandUp={() => standUp(seatedPlayer.id)}
+                   />
+                 ) : (
+                   phase === GamePhase.Setup && (
+                     <button
+                        onClick={() => handleSeatClick(i)}
+                        style={style}
+                        className="absolute w-14 h-14 rounded-full border-2 border-dashed border-white/20 flex items-center justify-center text-white/30 hover:text-yellow-400 hover:border-yellow-400 hover:bg-white/5 transition-all group"
+                     >
+                        <Plus className="group-hover:scale-110 transition-transform" />
+                     </button>
+                   )
+                 )}
+               </React.Fragment>
+             );
+          })}
 
         </div>
       </div>
@@ -553,7 +622,7 @@ const App: React.FC = () => {
           
           {/* Player Info / Peek */}
           <div className="flex items-center gap-4 w-full md:w-auto justify-between md:justify-start">
-             {phase !== GamePhase.Showdown && currentPlayer && (
+             {phase !== GamePhase.Setup && phase !== GamePhase.Showdown && currentPlayer && (
                <div className="flex flex-col">
                   <span className="text-slate-400 text-xs uppercase">Action</span>
                   <div className="flex items-center gap-3">
@@ -571,10 +640,15 @@ const App: React.FC = () => {
                   </div>
                </div>
              )}
+             {phase === GamePhase.Setup && (
+                <div className="text-slate-400 text-sm italic">
+                  Take a seat to begin...
+                </div>
+             )}
           </div>
 
           {/* Actions */}
-          {phase !== GamePhase.Showdown && currentPlayer && (
+          {phase !== GamePhase.Setup && phase !== GamePhase.Showdown && currentPlayer && (
             <div className="flex gap-2 w-full md:w-auto">
                <button 
                  onClick={handleFold}
@@ -607,6 +681,7 @@ const App: React.FC = () => {
            <MessageSquare size={12} /> Table Talk
         </div>
         <div ref={logContainerRef} className="flex-1 overflow-y-auto p-2 space-y-2 pointer-events-auto">
+           {gameLogs.length === 0 && <div className="text-slate-600 text-xs italic text-center mt-4">Game hasn't started yet</div>}
            {gameLogs.map((log) => (
              <div key={log.id} className={`text-xs p-2 rounded ${
                log.type === 'gemini' ? 'bg-indigo-900/50 border border-indigo-500/30 text-indigo-200' : 

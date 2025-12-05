@@ -43,6 +43,7 @@ export interface Player {
   isDealer: boolean;
   isSmallBlind: boolean;
   isBigBlind: boolean;
+  seatIndex: number; // 0-8 fixed position at the table
 }
 
 export interface HandEvaluation {

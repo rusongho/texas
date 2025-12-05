@@ -2,7 +2,7 @@ import React from 'react';
 import { Player, PlayerStatus } from '../types';
 import { VisualCard } from './VisualCard';
 import { Chips } from './Chips';
-import { Crown, AlertCircle } from 'lucide-react';
+import { Crown, X } from 'lucide-react';
 
 interface PlayerAvatarProps {
   player: Player;
@@ -10,26 +10,36 @@ interface PlayerAvatarProps {
   isWinner: boolean;
   revealCards: boolean;
   positionStyle: React.CSSProperties;
+  onStandUp?: () => void;
+  canStandUp?: boolean;
 }
 
-export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({ player, isActive, isWinner, revealCards, positionStyle }) => {
+export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({ 
+  player, 
+  isActive, 
+  isWinner, 
+  revealCards, 
+  positionStyle,
+  onStandUp,
+  canStandUp 
+}) => {
   const isFolded = player.status === PlayerStatus.Folded;
   const isBusted = player.status === PlayerStatus.Busted;
 
   return (
     <div 
-      className={`absolute flex flex-col items-center transition-all duration-500 ${isFolded || isBusted ? 'opacity-50 grayscale' : 'opacity-100'}`}
+      className={`absolute flex flex-col items-center transition-all duration-500 z-10 ${isFolded || isBusted ? 'opacity-50 grayscale' : 'opacity-100'}`}
       style={positionStyle}
     >
       {/* Bet Bubble */}
       {player.bet > 0 && (
-        <div className="absolute -top-8 animate-bounce">
+        <div className="absolute -top-8 animate-bounce z-20">
            <Chips amount={player.bet} className="bg-blue-900/80 border-blue-400/30" />
         </div>
       )}
 
       {/* Cards */}
-      <div className="flex gap-1 mb-1 relative z-10">
+      <div className="flex gap-1 mb-1 relative z-10 min-h-[3rem]">
         {player.hand.map((card, idx) => (
           <div key={idx} className={`transition-transform duration-300 ${isActive ? '-translate-y-2' : ''}`}>
              <VisualCard 
@@ -43,11 +53,22 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({ player, isActive, is
 
       {/* Avatar Circle */}
       <div className={`
-        relative w-16 h-16 rounded-full border-4 flex items-center justify-center bg-slate-800 shadow-xl
+        relative w-16 h-16 rounded-full border-4 flex items-center justify-center bg-slate-800 shadow-xl group
         ${isActive ? 'border-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.5)] scale-110' : 'border-slate-600'}
         ${isWinner ? 'border-green-500 shadow-[0_0_30px_rgba(34,197,94,0.6)]' : ''}
         transition-all duration-300
       `}>
+        {/* Stand Up Button (Only in Setup) */}
+        {canStandUp && (
+          <button 
+            onClick={(e) => { e.stopPropagation(); onStandUp?.(); }}
+            className="absolute -top-1 -right-1 bg-red-500 hover:bg-red-600 text-white rounded-full p-0.5 shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-30"
+            title="Stand Up"
+          >
+            <X size={12} />
+          </button>
+        )}
+
         {player.isDealer && (
           <div className="absolute -right-2 -top-1 w-6 h-6 bg-white text-black font-bold rounded-full flex items-center justify-center text-xs border border-slate-400 z-20">D</div>
         )}
