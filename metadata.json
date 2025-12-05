@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Poker Night",
+  "description": "A local multiplayer Texas Hold'em game for up to 9 players with Gemini-powered commentary.",
+  "requestFramePermissions": []
+}
