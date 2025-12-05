@@ -1,7 +1,16 @@
 import { GoogleGenAI } from "@google/genai";
 import { Card, Player } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// We initialize lazily to avoid top-level "process is not defined" errors in browser environments during initial load.
+const getAIClient = () => {
+  // @ts-ignore - Process env is replaced by build tools or handled by the environment
+  const apiKey = process.env.API_KEY; 
+  if (!apiKey) {
+    console.warn("Gemini API Key is missing.");
+    return null;
+  }
+  return new GoogleGenAI({ apiKey });
+};
 
 export const getGeminiCommentary = async (
   communityCards: Card[],
@@ -10,6 +19,9 @@ export const getGeminiCommentary = async (
   potSize: number
 ): Promise<string> => {
   try {
+    const ai = getAIClient();
+    if (!ai) return `Congratulations ${winner.name} on the big win!`;
+
     const cardStr = communityCards.map(c => `${c.rank}${c.suit}`).join(' ');
     const winnerHandStr = winner.hand.map(c => `${c.rank}${c.suit}`).join(' ');
     
