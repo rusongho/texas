@@ -34,7 +34,7 @@ export enum PlayerStatus {
 }
 
 export interface Player {
-  id: string;
+  id: string; // This will map to Peer ID for remote players
   name: string;
   chips: number;
   bet: number; // Current round bet
@@ -44,6 +44,7 @@ export interface Player {
   isSmallBlind: boolean;
   isBigBlind: boolean;
   seatIndex: number; // 0-8 fixed position at the table
+  isSelf?: boolean; // Helper to identify "Me" in UI
 }
 
 export interface HandEvaluation {
@@ -57,4 +58,28 @@ export interface LogEntry {
   message: string;
   type: 'info' | 'action' | 'winner' | 'gemini';
   timestamp: number;
+}
+
+// --- Networking Types ---
+
+export type MessageType = 'SYNC_STATE' | 'ACTION_SIT' | 'ACTION_GAME' | 'ACTION_STAND';
+
+export interface NetworkMessage {
+  type: MessageType;
+  payload: any;
+  senderId?: string;
+}
+
+export interface SyncedState {
+  players: Player[];
+  communityCards: Card[];
+  pot: number;
+  currentBet: number;
+  dealerIdx: number;
+  activePlayerIdx: number;
+  phase: GamePhase;
+  gameLogs: LogEntry[];
+  winnerIdx: number | null;
+  autoNextTimer: number | null;
+  lastUpdate: number;
 }
